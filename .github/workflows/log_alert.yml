@@ -1,0 +1,208 @@
+# =============================================================================
+# GitHub Actions: Log PharmaSafe Drug Interaction Alert
+# =============================================================================
+# Triggers:
+#   1. Manual (workflow_dispatch) - enter inputs in UI
+#   2. Cron (every 5 min) - batch-check → process-queue (fully autonomous)
+#
+# Autonomous flow:
+#   batch-check: finds unchecked medications, runs interaction check, queues critical/moderate alerts
+#   process-queue: processes pending requests → interaction_alerts → Kibana rule → email
+#
+# Required secrets (Settings → Secrets → Actions):
+#   ES_ENDPOINT  - Elasticsearch URL
+#   ES_API_KEY   - Elasticsearch API key
+# =============================================================================
+
+name: Log Drug Interaction Alert
+
+on:
+  workflow_dispatch:
+    inputs:
+      patient_id:
+        description: 'Patient ID (e.g. PT-4821)'
+        required: true
+        type: string
+      new_drug:
+        description: 'New drug being prescribed'
+        required: true
+        type: string
+      conflicting_drug:
+        description: 'Existing drug that conflicts'
+        required: true
+        type: string
+      severity:
+        description: 'Severity (critical, moderate, low)'
+        required: true
+        type: choice
+        options:
+          - critical
+          - moderate
+          - low
+      mechanism:
+        description: 'Mechanism of the interaction'
+        required: true
+        type: string
+      recommendation:
+        description: 'Recommended action'
+        required: true
+        type: string
+      prescribing_doctor:
+        description: 'Prescribing physician (optional)'
+        required: false
+        type: string
+        default: ''
+  schedule:
+    # Every 5 minutes
+    - cron: '*/5 * * * *'
+
+jobs:
+  # Manual trigger: log single alert from inputs
+  log-from-inputs:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate alert ID and timestamp
+        id: meta
+        run: |
+          ALERT_ID="ALR-$(openssl rand -hex 4 | tr '[:lower:]' '[:upper:]')"
+          FLAGGED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "alert_id=$ALERT_ID" >> $GITHUB_OUTPUT
+          echo "flagged_at=$FLAGGED_AT" >> $GITHUB_OUTPUT
+
+      - name: Index alert to Elasticsearch
+        env:
+          ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
+          ES_API_KEY: ${{ secrets.ES_API_KEY }}
+        run: |
+          ALERT_ID="${{ steps.meta.outputs.alert_id }}"
+          FLAGGED_AT="${{ steps.meta.outputs.flagged_at }}"
+
+          BODY=$(jq -n \
+            --arg alert_id "$ALERT_ID" \
+            --arg patient_id "${{ github.event.inputs.patient_id }}" \
+            --arg new_drug "${{ github.event.inputs.new_drug }}" \
+            --arg conflicting_drug "${{ github.event.inputs.conflicting_drug }}" \
+            --arg severity "${{ github.event.inputs.severity }}" \
+            --arg mechanism "${{ github.event.inputs.mechanism }}" \
+            --arg recommendation "${{ github.event.inputs.recommendation }}" \
+            --arg prescribing_doctor "${{ github.event.inputs.prescribing_doctor }}" \
+            --arg flagged_at "$FLAGGED_AT" \
+            '{
+              alert_id: $alert_id,
+              patient_id: $patient_id,
+              new_drug: $new_drug,
+              conflicting_drug: $conflicting_drug,
+              severity: $severity,
+              mechanism: $mechanism,
+              recommendation: $recommendation,
+              status: "pending_review",
+              flagged_at: $flagged_at,
+              reviewed_by: null,
+              prescribing_doctor: $prescribing_doctor
+            }')
+
+          curl -s -X POST "${ES_ENDPOINT}/interaction_alerts/_doc/${ALERT_ID}" \
+            -H "Authorization: ApiKey ${ES_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"
+
+      - name: Confirm success
+        run: echo "Alert ${{ steps.meta.outputs.alert_id }} logged. Email in 1-2 min."
+
+  # Cron trigger (1): find unchecked prescriptions, run interaction checks, queue alerts
+  batch-check:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run batch interaction check
+        env:
+          ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
+          ES_API_KEY: ${{ secrets.ES_API_KEY }}
+        run: python scripts/batch_check_interactions.py
+
+  # Cron trigger (2): process pending requests from queue
+  process-queue:
+    if: github.event_name == 'schedule'
+    needs: batch-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query and process pending requests
+        env:
+          ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
+          ES_API_KEY: ${{ secrets.ES_API_KEY }}
+        run: |
+          curl -s -X POST "${ES_ENDPOINT}/pharmasafe_alert_requests/_search" \
+            -H "Authorization: ApiKey ${ES_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"query":{"term":{"status":"pending"}},"size":50,"sort":[{"created_at":"asc"}]}' \
+            -o pending.json
+
+          COUNT=$(jq '.hits.hits | length' pending.json)
+          if [ "$COUNT" = "0" ]; then
+            echo "No pending requests."
+            exit 0
+          fi
+
+          echo "Processing $COUNT pending request(s)..."
+          for i in $(seq 0 $((COUNT - 1))); do
+            SRC=$(jq -r ".hits.hits[$i]._source" pending.json)
+            REQ_ID=$(jq -r ".hits.hits[$i]._id" pending.json)
+
+            PATIENT_ID=$(echo "$SRC" | jq -r '.patient_id')
+            NEW_DRUG=$(echo "$SRC" | jq -r '.new_drug')
+            CONFLICTING_DRUG=$(echo "$SRC" | jq -r '.conflicting_drug')
+            SEVERITY=$(echo "$SRC" | jq -r '.severity')
+            MECHANISM=$(echo "$SRC" | jq -r '.mechanism')
+            RECOMMENDATION=$(echo "$SRC" | jq -r '.recommendation')
+            PRESCRIBING_DOCTOR=$(echo "$SRC" | jq -r '.prescribing_doctor // ""')
+
+            ALERT_ID="ALR-$(openssl rand -hex 4 | tr '[:lower:]' '[:upper:]')"
+            FLAGGED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            BODY=$(jq -n \
+              --arg alert_id "$ALERT_ID" \
+              --arg patient_id "$PATIENT_ID" \
+              --arg new_drug "$NEW_DRUG" \
+              --arg conflicting_drug "$CONFLICTING_DRUG" \
+              --arg severity "$SEVERITY" \
+              --arg mechanism "$MECHANISM" \
+              --arg recommendation "$RECOMMENDATION" \
+              --arg prescribing_doctor "$PRESCRIBING_DOCTOR" \
+              --arg flagged_at "$FLAGGED_AT" \
+              '{
+                alert_id: $alert_id,
+                patient_id: $patient_id,
+                new_drug: $new_drug,
+                conflicting_drug: $conflicting_drug,
+                severity: $severity,
+                mechanism: $mechanism,
+                recommendation: $recommendation,
+                status: "pending_review",
+                flagged_at: $flagged_at,
+                reviewed_by: null,
+                prescribing_doctor: $prescribing_doctor
+              }')
+
+            curl -s -X POST "${ES_ENDPOINT}/interaction_alerts/_doc/${ALERT_ID}" \
+              -H "Authorization: ApiKey ${ES_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "$BODY"
+
+            curl -s -X POST "${ES_ENDPOINT}/pharmasafe_alert_requests/_update/${REQ_ID}" \
+              -H "Authorization: ApiKey ${ES_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d '{"doc":{"status":"processed"}}'
+
+            echo "Processed $REQ_ID -> $ALERT_ID"
+          done

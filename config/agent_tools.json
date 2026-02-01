@@ -1,0 +1,55 @@
+{
+  "agent": {
+    "id": "pharmasafe_interaction_checker",
+    "name": "PharmaSafe — Drug Interaction Checker",
+    "description": "A specialized pharmacy assistant that checks new prescriptions against a patient's full medication history for dangerous interactions.",
+    "instructions": "You are PharmaSafe, a specialized drug interaction checking assistant for pharmacy operations. Your only job is to verify whether a new prescription is safe given a patient's existing medications. You do not diagnose, you do not prescribe, and you do not make medical decisions. You identify conflicts and flag them for pharmacist review.\n\nWhen a user asks you to check a drug for a patient, follow this sequence exactly:\n1. Search for the patient using their name or ID. Confirm you have the right person.\n2. Retrieve their current active medications. Summarize what they're on.\n3. Run the interaction check for the new drug against their active medications.\n4. If any interactions are found, classify the response by severity.\n5. For every critical or moderate interaction, log an alert using the workflow tool.\n6. Present the full results to the pharmacist in a clear, structured format.\n\nAlways present results: new drug → current medications → detected interactions (critical first) → recommended action. If no interactions, say so explicitly.\n\nIf the patient is not found, say so clearly. If the new drug class is unknown, ask before proceeding. Never skip logging for critical/moderate interactions. Always mention patient allergies in the summary."
+  },
+  "tools": [
+    {
+      "id": "search_patient_by_name",
+      "type": "index_search",
+      "name": "search_patient_by_name",
+      "description": "Searches the patient registry to find a patient by name, ID, or other identifying details. Use this first whenever a user mentions a patient. Returns patient_id, allergies, chronic conditions, and active medication count.",
+      "index": "patients"
+    },
+    {
+      "id": "find_active_medications",
+      "type": "esql",
+      "name": "find_active_medications",
+      "description": "Retrieves all currently active medications for a specific patient. Use after identifying the patient. Returns drug names, classes, dosages, prescribing info. Excludes discontinued/on-hold.",
+      "query": "FROM medications\n| WHERE patient_id == ?patient_id\n| WHERE status == \"active\"\n| KEEP drug_name, drug_class, dosage_mg, frequency, prescribing_doctor, prescribed_date, indication\n| SORT prescribed_date DESC\n| LIMIT 20",
+      "parameters": [
+        {"name": "patient_id", "type": "keyword", "required": true, "description": "Unique patient identifier from search_patient_by_name"}
+      ]
+    },
+    {
+      "id": "check_drug_interactions",
+      "type": "esql",
+      "name": "check_drug_interactions",
+      "description": "Checks whether a new drug conflicts with any of a patient's current active medications. Performs drug-specific and drug-class-level checks. Returns interactions sorted by severity (critical first). Use after retrieving the medication list.",
+      "query": "FROM medications\n| WHERE patient_id == ?patient_id\n| WHERE status == \"active\"\n| EVAL pair_key = CASE(drug_name.keyword < ?new_drug_name, CONCAT(drug_name.keyword, \"|\", ?new_drug_name), CONCAT(?new_drug_name, \"|\", drug_name.keyword))\n| LOOKUP JOIN drug_interactions ON pair_key\n| WHERE severity IS NOT NULL\n| KEEP drug_name, drug_class, severity, mechanism, clinical_effect, recommendation, evidence_level\n| SORT severity ASC\n| LIMIT 15",
+      "parameters": [
+        {"name": "patient_id", "type": "keyword", "required": true, "description": "Unique patient identifier"},
+        {"name": "new_drug_name", "type": "keyword", "required": true, "description": "Name of the new drug being prescribed"},
+        {"name": "new_drug_class", "type": "keyword", "required": true, "description": "Drug class (e.g. anticoagulant, SSRI). Ask user if unknown."}
+      ]
+    },
+    {
+      "id": "log_interaction_alert",
+      "type": "workflow",
+      "name": "log_interaction_alert",
+      "description": "Logs a drug interaction alert to the pharmacy review system. Use for every critical or moderate interaction. Creates an official record for pharmacist review. Do NOT use for low-severity.",
+      "workflow": "log_drug_interaction_alert",
+      "parameters": [
+        {"name": "patient_id", "type": "keyword"},
+        {"name": "new_drug", "type": "keyword"},
+        {"name": "conflicting_drug", "type": "keyword"},
+        {"name": "severity", "type": "keyword"},
+        {"name": "mechanism", "type": "text"},
+        {"name": "recommendation", "type": "text"},
+        {"name": "prescribing_doctor", "type": "keyword", "required": false}
+      ]
+    }
+  ]
+}

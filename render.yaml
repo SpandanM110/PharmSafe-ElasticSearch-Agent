@@ -1,0 +1,45 @@
+# PharmaSafe — Render Blueprint
+# Deploy: Connect repo to Render, apply Blueprint, add ES_ENDPOINT + ES_API_KEY
+#
+# Services:
+#   - pharmasafe-api: Web API (POST /alert, GET /health)
+#   - pharmasafe-cron: Cron job (every 5 min) — batch-check + process-queue
+#
+# Required env (add in Dashboard or during Blueprint creation):
+#   ES_ENDPOINT  - Elasticsearch URL
+#   ES_API_KEY   - Elasticsearch API key
+
+services:
+  # Web API — log alerts via HTTP, health check for zero-downtime deploys
+  - type: web
+    name: pharmasafe-api
+    runtime: python
+    region: oregon
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.alert_api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+
+    envVars:
+      - key: ES_ENDPOINT
+        sync: false
+      - key: ES_API_KEY
+        sync: false
+
+  # Cron job — every 5 min: batch-check + process-queue (fully autonomous)
+  - type: cron
+    name: pharmasafe-cron
+    runtime: python
+    region: oregon
+    plan: starter
+
+    schedule: "*/5 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/cron_runner.py
+
+    envVars:
+      - key: ES_ENDPOINT
+        sync: false
+      - key: ES_API_KEY
+        sync: false

@@ -1,0 +1,118 @@
+# =============================================================================
+# Workflow: Log Drug Interaction Alert
+# Category: pharmasafe, healthcare, alerts
+#
+# Creates an interaction alert document when the PharmaSafe agent detects
+# a critical or moderate drug interaction. The agent invokes this workflow
+# as a tool. The document is indexed to interaction_alerts, which triggers
+# the Kibana Alerting rule to send email via SMTP.
+#
+# Reference: https://github.com/elastic/workflows
+# =============================================================================
+name: log_drug_interaction_alert
+description: Logs a drug interaction alert to interaction_alerts when the PharmaSafe agent detects a critical or moderate conflict. Creates an official record for pharmacist review.
+enabled: true
+
+tags:
+  - pharmasafe
+  - healthcare
+  - drug-interactions
+  - alerts
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Manual trigger - invoked by the PharmaSafe agent when it detects an interaction
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Parameters passed by the agent when invoking this workflow
+inputs:
+  - name: patient_id
+    type: string
+    required: true
+    description: Unique patient identifier (e.g. PT-4821)
+  - name: new_drug
+    type: string
+    required: true
+    description: New drug being prescribed
+  - name: conflicting_drug
+    type: string
+    required: true
+    description: Existing drug that conflicts
+  - name: severity
+    type: string
+    required: true
+    description: Severity level (critical, moderate, low)
+  - name: mechanism
+    type: string
+    required: true
+    description: Mechanism of the interaction
+  - name: recommendation
+    type: string
+    required: true
+    description: Recommended action for the pharmacist
+  - name: prescribing_doctor
+    type: string
+    required: false
+    default: ""
+    description: Prescribing physician name (for targeted notifications)
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+consts:
+  indexName: interaction_alerts
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+steps:
+  # -------------------------------------------------------------------------
+  # STEP 1: Generate alert ID and timestamp
+  # -------------------------------------------------------------------------
+  # Uses Liquid to create alert_id (ALR-XXXXXXXX format) and ISO timestamp
+  - name: prepare_document
+    type: console
+    with:
+      message: |
+        Preparing alert for {{ inputs.patient_id }}: {{ inputs.new_drug }} + {{ inputs.conflicting_drug }} ({{ inputs.severity }})
+
+  # -------------------------------------------------------------------------
+  # STEP 2: Index the alert document to interaction_alerts
+  # -------------------------------------------------------------------------
+  # Uses elasticsearch.request to POST a document. Document _id = alert_id
+  # for compatibility with list_alerts and update_alert_status scripts.
+  - name: index_alert
+    type: elasticsearch.request
+    with:
+      method: POST
+      path: "{{ consts.indexName }}/_doc/ALR-{{ 'now' | date: '%Y%m%d%H%M%S' }}{{ inputs.patient_id | replace: '-', '' | slice: 0, 4 }}"
+      headers:
+        content-type: application/json
+      body: |
+        {
+          "alert_id": "ALR-{{ 'now' | date: '%Y%m%d%H%M%S' }}{{ inputs.patient_id | replace: '-', '' | slice: 0, 4 }}",
+          "patient_id": "{{ inputs.patient_id }}",
+          "new_drug": "{{ inputs.new_drug }}",
+          "conflicting_drug": "{{ inputs.conflicting_drug }}",
+          "severity": "{{ inputs.severity }}",
+          "mechanism": "{{ inputs.mechanism }}",
+          "recommendation": "{{ inputs.recommendation }}",
+          "status": "pending_review",
+          "flagged_at": "{{ 'now' | date: '%Y-%m-%dT%H:%M:%S' }}Z",
+          "reviewed_by": null,
+          "prescribing_doctor": "{{ inputs.prescribing_doctor | default: '' }}"
+        }
+
+  # -------------------------------------------------------------------------
+  # STEP 3: Confirm success
+  # -------------------------------------------------------------------------
+  - name: confirm_indexed
+    type: console
+    with:
+      message: |
+        Alert logged successfully for {{ inputs.patient_id }}. Email notification will be sent by Kibana rule.
