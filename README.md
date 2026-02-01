@@ -127,20 +127,24 @@ When the agent detects critical/moderate interactions, alerts can be logged via:
 
 The batch processor runs every 5 min: finds unchecked prescriptions, runs interaction checks, queues critical/moderate alerts, processes queue → `interaction_alerts` → Kibana rule → email.
 
-### Render (Recommended)
+### Render (API only — FREE)
+
+Per [Render's free tier](https://render.com/docs/free), only Web Services support Free instances. Cron jobs require a paid plan.
 
 1. Push repo to GitHub
 2. [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**
 3. Connect repo; Render detects `render.yaml`
-4. Add `ES_ENDPOINT` and `ES_API_KEY` to both **pharmasafe-api** and **pharmasafe-cron**
+4. Add `ES_ENDPOINT` and `ES_API_KEY` to **pharmasafe-api**
 5. **Apply**
 
-**Services:** Web API (POST /alert, GET /health) + Cron job (every 5 min)
+**Deploys:** Web API (POST /alert, GET /health) — **free**. Spins down after 15 min idle.
 
-### GitHub Actions
+### GitHub Actions (Batch processor — FREE)
+
+For fully autonomous operation at no cost, use GitHub Actions for the cron:
 
 1. Add secrets: `ES_ENDPOINT`, `ES_API_KEY`
-2. Cron runs every 5 min: batch-check → process-queue
+2. Cron runs every 5 min: batch-check → process-queue (free for public repos)
 
 ### Local Test
 
@@ -239,4 +243,4 @@ Expected: Critical (Warfarin + Aspirin), moderate (Warfarin + Atorvastatin). Ale
 
 - **LOOKUP JOIN** needs Elasticsearch 8.18+ and `drug_interactions` in lookup mode. Serverless may create a regular index; LOOKUP may not work until supported.
 - **Agent Builder** requires Enterprise subscription on Elastic Cloud.
-- **Render free tier:** Web service spins down after 15 min inactivity. Cron requires paid plan.
+- **Render free tier:** Web service spins down after 15 min inactivity. For free autonomous cron, use GitHub Actions.
