@@ -10,6 +10,89 @@ PharmaSafe sits at the point of dispensing. When a new prescription comes in, it
 
 **Flow:** Pharmacist asks → Agent finds patient → Agent checks interactions → Agent logs alerts → Kibana rule sends email
 
+**Fully autonomous flow (no manual steps):** Simulate prescription (every 6 h) → Batch check (every 5 min) → Process queue → Kibana rule → Email
+
+---
+
+## How Everything Connects
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           ELASTICSEARCH (data store)                         │
+│  patients | medications | drug_interactions | interaction_alerts | ...      │
+└─────────────────────────────────────────────────────────────────────────────┘
+         ▲                    ▲                    ▲
+         │                    │                    │
+    ┌────┴────┐          ┌────┴────┐          ┌────┴────┐
+    │ Kibana  │          │ Render  │          │ GitHub  │
+    │ Rule    │          │ API     │          │ Actions │
+    │         │          │         │          │         │
+    │ Email   │          │ POST    │          │ simulate│
+    │ on alert│          │ /alert  │          │ + batch │
+    └─────────┘          └─────────┘          └─────────┘
+    every 1 min          pharmasafe-api       every 6h + 5min
+```
+
+| Component | Connects to Elasticsearch via | Purpose |
+|-----------|-------------------------------|---------|
+| **GitHub Actions** | `ES_ENDPOINT` + `ES_API_KEY` (GitHub secrets) | Simulate prescription (every 6 h), batch-check (every 5 min), process-queue |
+| **Kibana Rule** | Same Elastic project | Query `interaction_alerts`, send email when critical |
+| **Render API** | `ES_ENDPOINT` + `ES_API_KEY` (Render env vars) | Optional: log alerts via HTTP (POST /alert) |
+| **Kibana Agent** | Same Elastic project | Optional: chat, run checks (ad-hoc queries) |
+
+---
+
+## Connect Kibana Agent to Elasticsearch
+
+The Kibana Agent runs inside Kibana and uses the **same Elasticsearch project** Kibana is connected to. No extra credentials are needed — Kibana already talks to Elasticsearch.
+
+### Prerequisites
+
+1. **Indices exist** — Run locally first:
+   ```powershell
+   python scripts/create_indices.py
+   python scripts/seed_data.py
+   ```
+2. **Same Elastic project** — Use Kibana from the same Elastic Cloud project where you ran the scripts (same `ES_ENDPOINT`).
+
+### Step-by-step
+
+1. **Open Kibana** — Use the Kibana URL from your Elastic Cloud project (Help → Connection Details).
+2. **Go to Agents** — In Kibana, use the **global search** (top bar) and search for **"Agents"** or **"Agent Builder"**, or check **Machine Learning** → **Agents** / **AI Assistant** → **Agents** (menu varies by Elastic version).
+3. **Create agent** — Click **Create agent**.
+4. **Name** — e.g. "PharmaSafe".
+5. **Instructions** — Copy from `config/agent_tools.json` (field `instructions`).
+6. **Add tools** — Create and assign these tools (see Agent Builder Setup below).
+7. **Save** — The agent will use Kibana’s connection to Elasticsearch.
+
+### Verify connection
+
+- In Agent Chat, ask: *"Check Warfarin for Sarah Mitchell"*
+- The agent should search `patients`, query `medications` and `drug_interactions`, and return results.
+
+If the agent says "patient not found" or returns no data, check:
+- Indices exist: Kibana → **Discover** → create data views for `patients`, `medications`, `drug_interactions`
+- You’re in the correct Elastic project (same deployment as where you ran `create_indices.py`)
+
+---
+
+## Connect Render API to Elasticsearch
+
+The Render API at **https://pharmasafe-api.onrender.com** must have Elasticsearch credentials to log alerts.
+
+1. Go to [Render Dashboard](https://dashboard.render.com) → **pharmasafe-api** → **Environment**
+2. Add (or verify) these variables:
+
+| Key | Value |
+|-----|-------|
+| `ES_ENDPOINT` | Your Elasticsearch URL (e.g. `https://xxxxx.es.us-east-1.aws.elastic.cloud:443`) |
+| `ES_API_KEY` | Your Elasticsearch API key (same as in `.env`) |
+
+3. **Save** — Render will redeploy the service.
+4. Test: `https://pharmasafe-api.onrender.com/health` → `{"status":"ok"}`
+
+**Test POST /alert:** Use [Swagger UI](https://pharmasafe-api.onrender.com/docs) → POST /alert → Try it out.
+
 ---
 
 ## Prerequisites
@@ -32,11 +115,14 @@ pip install -r requirements.txt
 python scripts/create_indices.py
 python scripts/seed_data.py
 
-# 3. Set up agent in Kibana (see Agent Builder section below)
+# 3. Add GitHub secrets: ES_ENDPOINT, ES_API_KEY
 
-# 4. Test
-# In Agent Chat: "Check Warfarin for Sarah Mitchell"
+# 4. Create Kibana rule (Elasticsearch query on interaction_alerts, email connector)
+
+# 5. Push to GitHub — autonomous flow runs: simulate (6h) + batch (5min) → email
 ```
+
+**Optional:** Set up Kibana Agent for ad-hoc chat queries (see Agent Builder section).
 
 ---
 
@@ -123,11 +209,34 @@ When the agent detects critical/moderate interactions, alerts can be logged via:
 
 ---
 
-## Fully Autonomous (Batch Processor)
+## Fully Autonomous (No Manual Steps)
 
-The batch processor runs every 5 min: finds unchecked prescriptions, runs interaction checks, queues critical/moderate alerts, processes queue → `interaction_alerts` → Kibana rule → email.
+The system runs end-to-end without human intervention:
 
-### Render (API only — FREE)
+| Step | Workflow | Schedule | What it does |
+|------|----------|----------|--------------|
+| 1 | **Simulate prescription** | Every 6 h | Adds Warfarin for Sarah Mitchell (PT-4821) → triggers Aspirin+Warfarin (critical) |
+| 2 | **Batch check** | Every 5 min | Finds unchecked meds, runs ES|QL interaction checks, queues critical/moderate alerts |
+| 3 | **Process queue** | Every 5 min | Indexes queued alerts → `interaction_alerts` |
+| 4 | **Kibana rule** | Every 1 min | Queries `interaction_alerts`, sends email when count > 0 |
+
+### Setup (One-Time)
+
+1. **GitHub secrets:** `ES_ENDPOINT`, `ES_API_KEY`
+2. **Kibana rule:** Elasticsearch query on `interaction_alerts`, email connector
+3. **Indices + seed data:** Run `create_indices.py` and `seed_data.py` once
+
+After that, no manual steps — alerts and emails run automatically.
+
+### GitHub Actions Workflows
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| **Simulate prescription** | Every 6 h, or manual | Adds new prescription (Warfarin) → batch picks it up |
+| **Log Drug Interaction Alert** | Every 5 min (cron), or manual | batch-check → process-queue |
+| **Run batch processor** | Manual only | Same as cron, on demand |
+
+### Render (API — Optional)
 
 Per [Render's free tier](https://render.com/docs/free), only Web Services support Free instances. Cron jobs require a paid plan.
 
@@ -137,20 +246,12 @@ Per [Render's free tier](https://render.com/docs/free), only Web Services suppor
 4. Add `ES_ENDPOINT` and `ES_API_KEY` to **pharmasafe-api**
 5. **Apply**
 
-**Deploys:** Web API (POST /alert, GET /health) — **free**. Spins down after 15 min idle.
+**Deploys:** Web API (POST /alert, GET /health) — **free**. Spins down after 15 min idle. Use for external systems that POST alerts directly.
 
-### GitHub Actions (Batch processor — FREE)
-
-For fully autonomous operation at no cost, use GitHub Actions for the cron:
-
-1. Add secrets: `ES_ENDPOINT`, `ES_API_KEY`
-2. Cron runs every 5 min: batch-check → process-queue (free for public repos)
-3. **Manual test:** Actions → **Run batch processor** → Run workflow (runs batch-check + process-queue on demand)
-
-### Local Test
+### Local Test (Optional)
 
 ```bash
-# Add new prescription (triggers batch)
+# Simulate: add prescription
 python scripts/add_prescription.py --patient-id PT-4821 --drug Warfarin --drug-class anticoagulant
 
 # Run batch + process (simulates cron)

@@ -1,0 +1,56 @@
+# =============================================================================
+# GitHub Actions: Simulate New Prescription (Autonomous Source)
+# =============================================================================
+# Runs on schedule to add a new prescription that triggers drug interactions.
+# Simulates a pharmacy system adding prescriptions. The batch processor (every 5 min)
+# picks up unchecked medications, runs interaction checks, queues alerts.
+#
+# Flow: simulate_prescription → batch-check (5 min) → process-queue → Kibana rule → email
+#
+# Schedule: Every 6 hours (adjust as needed; avoid spamming)
+# Required secrets: ES_ENDPOINT, ES_API_KEY
+# =============================================================================
+
+name: Simulate prescription
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours at :00
+  workflow_dispatch:       # Manual trigger for testing
+
+jobs:
+  add-prescription:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add prescription (Warfarin for Sarah Mitchell)
+        env:
+          ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
+          ES_API_KEY: ${{ secrets.ES_API_KEY }}
+        run: |
+          MED_ID="MED-$(openssl rand -hex 4 | tr '[:lower:]' '[:upper:]')"
+          PRESCRIBED_DATE=$(date -u +"%Y-%m-%d")
+
+          BODY=$(jq -n \
+            --arg med_id "$MED_ID" \
+            --arg prescribed_date "$PRESCRIBED_DATE" \
+            '{
+              medication_id: $med_id,
+              patient_id: "PT-4821",
+              drug_name: "Warfarin",
+              drug_class: "anticoagulant",
+              dosage_mg: null,
+              frequency: "once_daily",
+              prescribing_doctor: "Dr. James Chen",
+              prescribed_date: $prescribed_date,
+              status: "active",
+              indication: "",
+              source: "prescription",
+              interaction_checked: false
+            }')
+
+          curl -s -X POST "${ES_ENDPOINT}/medications/_doc/${MED_ID}" \
+            -H "Authorization: ApiKey ${ES_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"
+
+          echo "Added Warfarin for PT-4821 (Sarah Mitchell). Batch processor will detect Aspirin+Warfarin (critical) within ~5 min."
