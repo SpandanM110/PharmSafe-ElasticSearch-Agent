@@ -1,6 +1,7 @@
 # =============================================================================
-# GitHub Actions: Log PharmaSafe Drug Interaction Alert
+# Option B: Log Drug Interaction Alert (Autonomous Batch)
 # =============================================================================
+# GitHub Actions: Log PharmaSafe Drug Interaction Alert
 # Triggers:
 #   1. Manual (workflow_dispatch) - enter inputs in UI
 #   2. Cron (every 5 min) - batch-check → process-queue (fully autonomous)

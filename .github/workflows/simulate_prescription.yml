@@ -1,6 +1,7 @@
 # =============================================================================
-# GitHub Actions: Simulate New Prescription (Autonomous Source)
+# Option B: Simulate New Prescription (Autonomous Batch)
 # =============================================================================
+# GitHub Actions: Simulate New Prescription (Autonomous Source)
 # Runs on schedule to add a new prescription that triggers drug interactions.
 # Simulates a pharmacy system adding prescriptions. The batch processor (every 5 min)
 # picks up unchecked medications, runs interaction checks, queues alerts.

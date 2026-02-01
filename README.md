@@ -14,6 +14,120 @@ PharmaSafe sits at the point of dispensing. When a new prescription comes in, it
 
 ---
 
+## Two Options (Both Kept in Codebase)
+
+Both modes are supported. Choose based on how prescriptions enter the system.
+
+| Option | Files | When to Use |
+|-------|-------|-------------|
+| **Option A: Agent (real-time)** | `workflows/log_drug_interaction_alert.yaml`, Kibana Agent | Pharmacist asks in chat (e.g. "Check Warfarin for Sarah Mitchell"). No GitHub workflows. |
+| **Option B: Autonomous batch** | `.github/workflows/simulate_prescription.yml`, `log_alert.yml`, `batch_process.yml` | Prescriptions added by external system or simulate workflow. Runs on schedule. |
+
+You can use both: Agent for ad-hoc checks, batch for autonomous operation.
+
+---
+
+## Conditions & Decision Logic (In Detail)
+
+This section explains when each component runs, what conditions must be met, and how the system decides what to do.
+
+### Entry Points: What Triggers the System?
+
+| Entry Point | Condition | What Happens |
+|-------------|-----------|--------------|
+| **Agent (Kibana Chat)** | User asks e.g. "Check Warfarin for Sarah Mitchell" | Agent runs tools → checks interactions → logs alert via workflow → Kibana rule sends email. **Real-time, no workflows.** |
+| **Simulate prescription (GitHub)** | Schedule (every 6 h) OR manual "Run workflow" | Adds Warfarin for PT-4821 to `medications` with `interaction_checked: false`. Batch processor picks it up within ~5 min. |
+| **Batch check (GitHub)** | Schedule (every 5 min) OR manual "Run batch processor" | Finds meds where `interaction_checked != true` AND `status == "active"`, runs ES\|QL checks, queues critical/moderate alerts. |
+| **Process queue (GitHub)** | Runs after batch-check (same workflow) | Finds requests in `pharmasafe_alert_requests` where `status == "pending"`, indexes to `interaction_alerts`, marks `status == "processed"`. |
+| **Render API POST /alert** | External system POSTs alert JSON | Indexes directly to `interaction_alerts`. No batch or queue. Use when external system (EMR, web form) logs alerts. |
+| **Manual script** | `python scripts/log_alert.py ...` or `add_prescription.py` | Logs alert or adds prescription directly. For local testing. |
+
+### When Is an Alert Logged?
+
+An alert is written to `interaction_alerts` only when **all** of these are true:
+
+| Condition | Where Enforced | Value |
+|-----------|----------------|-------|
+| **Severity** | Agent, batch-check, API | `critical` OR `moderate` (low is ignored) |
+| **Interaction exists** | ES\|QL `drug_interactions` lookup | `pair_key` matches (e.g. `Aspirin\|Warfarin`) |
+| **Patient has active meds** | ES\|QL `medications` filter | `status == "active"` |
+| **New drug vs existing** | ES\|QL `pair_key` logic | New drug (e.g. Warfarin) paired with each active med |
+
+### When Does the Kibana Rule Send Email?
+
+| Condition | Required | Description |
+|-----------|----------|-------------|
+| **Index** | `interaction_alerts` | Rule queries this index |
+| **Query filter** | `severity == "critical"` AND `status == "pending_review"` | Only critical, unreviewed alerts |
+| **Threshold** | Count > 0 | Rule fires when at least one matching document exists |
+| **Schedule** | Every 1 min | Rule runs every minute |
+| **Connector** | Email (or Slack/Webhook) | Must be configured in Rules and Connectors |
+
+### Batch Processor: Detailed Conditions
+
+| Step | Condition | Action |
+|------|-----------|--------|
+| **Find unchecked meds** | `medications` where `status == "active"` AND `interaction_checked != true` | Query returns up to 50 meds, sorted by `prescribed_date` asc |
+| **Run interaction check** | For each unchecked med: `patient_id`, `drug_name`, `drug_class` | ES\|QL: LOOKUP JOIN `drug_interactions` on `pair_key` |
+| **Queue alert** | Interaction severity is `critical` OR `moderate` | Insert into `pharmasafe_alert_requests` with `status: "pending"` |
+| **Mark checked** | After processing each med | Update `medications.interaction_checked = true` |
+| **Process queue** | `pharmasafe_alert_requests` where `status == "pending"` | Index to `interaction_alerts`, update `status: "processed"` |
+
+### Agent: When Does It Log an Alert?
+
+| Condition | Required | Description |
+|-----------|----------|-------------|
+| **User request** | Pharmacist asks to check a drug for a patient | e.g. "Check Warfarin for Sarah Mitchell" |
+| **Patient found** | `search_patient_by_name` returns a match | From `patients` index |
+| **Interactions found** | `check_drug_interactions` returns rows | ES\|QL lookup finds conflicts |
+| **Severity** | `critical` OR `moderate` | Agent must call `log_interaction_alert` workflow for each |
+| **Workflow tool** | Agent has `log_interaction_alert` assigned | Writes to `interaction_alerts` |
+
+### Render API: When Is It Used?
+
+| Condition | Use Case |
+|-----------|----------|
+| **External system** | Pharmacy EMR, web form, or other service needs to log alerts via HTTP |
+| **No Elasticsearch access** | Caller has no ES credentials; uses Render as proxy |
+| **Manual test** | Swagger UI at `/docs` to POST an alert |
+| **Not used by** | Agent, batch processor, or GitHub workflows (they talk to ES directly) |
+
+### Data Flow Summary
+
+```
+SOURCE                    CONDITION                         DESTINATION
+─────────────────────────────────────────────────────────────────────────
+Agent Chat                 User asks "Check X for Y"          → interaction_alerts (via workflow)
+Simulate prescription     Every 6h or manual                → medications (interaction_checked: false)
+Batch check               Every 5min, finds unchecked meds    → pharmasafe_alert_requests (status: pending)
+Process queue             After batch-check, pending requests → interaction_alerts
+Render POST /alert         External HTTP POST                → interaction_alerts
+Kibana rule               Every 1min, count > 0, critical     → Email
+```
+
+### Quick Reference: Which Path to Use?
+
+| Scenario | Use | Workflows Needed? |
+|----------|-----|-------------------|
+| Pharmacist at desk, checks drug in real time | **Agent** | No |
+| External system adds prescriptions automatically | **Batch** (simulate + batch-check + process-queue) | Yes (cron) |
+| External system logs alerts directly | **Render POST /alert** | No |
+| Local testing | **Scripts** (`add_prescription.py`, `cron_runner.py`) | No (local only) |
+| One-off manual alert | **log_alert.py** or **Render /docs** | No |
+
+### Key Fields That Drive Conditions
+
+| Index | Field | Condition | Effect |
+|-------|-------|-----------|--------|
+| `medications` | `interaction_checked` | `false` | Batch processor includes this med in checks |
+| `medications` | `status` | `"active"` | Only active meds are checked |
+| `pharmasafe_alert_requests` | `status` | `"pending"` | Process queue picks it up |
+| `interaction_alerts` | `severity` | `"critical"` | Kibana rule sends email (moderate excluded) |
+| `interaction_alerts` | `status` | `"pending_review"` | Kibana rule sends email (reviewed alerts excluded) |
+| `drug_interactions` | `pair_key` | e.g. `Aspirin\|Warfarin` | ES\|QL LOOKUP JOIN matches interaction |
+
+---
+
 ## How Everything Connects
 
 ```
@@ -95,11 +209,27 @@ The Render API at **https://pharmasafe-api.onrender.com** must have Elasticsearc
 
 ---
 
-## Prerequisites
+## Prerequisites & Conditions
 
-- Elasticsearch (Cloud Serverless or Hosted) 8.18+
-- Kibana with Agent Builder (Enterprise)
-- Python 3.10+
+| Requirement | Condition | When Needed |
+|-------------|-----------|-------------|
+| **Elasticsearch** | Cloud Serverless or Hosted 8.18+ | Always — all data lives here |
+| **Indices** | `patients`, `medications`, `drug_interactions`, `interaction_alerts`, `pharmasafe_alert_requests` | Run `create_indices.py` once before any flow |
+| **Seed data** | Synthetic patients, meds, interactions | Run `seed_data.py` once — Agent and batch need this data |
+| **Kibana** | Same Elastic project as ES | For Agent, rules, Discover |
+| **Agent Builder** | Enterprise subscription | Only if using Agent |
+| **Python 3.10+** | Local or GitHub Actions | For scripts and batch processor |
+| **GitHub secrets** | `ES_ENDPOINT`, `ES_API_KEY` | Required for GitHub workflows |
+| **Kibana rule** | Elasticsearch query + email connector | Required for email notifications |
+
+---
+
+## Verification & Live Demo
+
+See **[VERIFICATION_AND_DEMO.md](VERIFICATION_AND_DEMO.md)** for:
+- Full verification checklist (indices, secrets, workflows, Kibana rule)
+- Step-by-step live demo of the autonomous flow (manual triggers, no waiting)
+- Troubleshooting
 
 ---
 
@@ -188,7 +318,7 @@ FROM medications
 
 ### Tool 4: Workflow — `log_interaction_alert` (optional)
 - Type: **Workflow**
-- Workflow: `log_drug_interaction_alert` (import from `workflows/log_drug_interaction_alert.yaml` if Workflows available)
+- Workflow: `log_drug_interaction_alert` (import from `workflows/agent/log_drug_interaction_alert.yaml` if Workflows available)
 
 ### Agent Instructions (Copy to Kibana Custom Instructions)
 
@@ -279,10 +409,18 @@ python scripts/backfill_interaction_checked.py
 
 1. **Stack Management** → **Rules and Connectors** → Create connector (Email/Slack/Webhook)
 2. **Rules** → **Create rule** → **Elasticsearch query**
-3. Index: `interaction_alerts`
-4. Query: `{"query": {"bool": {"filter": [{"term": {"severity": "critical"}}, {"term": {"status": "pending_review"}}]}}}`
-5. Check every: 1 min | Notify when: count > 0
-6. Add action: Email/Slack with `{{context.hits}}` template
+3. **Index:** `interaction_alerts`
+4. **Query (conditions for firing):**
+   ```json
+   {"query": {"bool": {"filter": [
+     {"term": {"severity": "critical"}},
+     {"term": {"status": "pending_review"}}
+   ]}}}
+   ```
+   Rule fires only when **both** `severity == "critical"` AND `status == "pending_review"`.
+5. **Schedule:** Check every 1 min
+6. **Threshold:** Notify when count > 0
+7. **Action:** Email/Slack with `{{context.hits}}` template
 
 **Troubleshooting:** If "Could not locate field: kibana.alert.group.value", set **Over** (not "Grouped Over") with no grouping field.
 
@@ -331,13 +469,15 @@ Expected: Critical (Warfarin + Aspirin), moderate (Warfarin + Atorvastatin). Ale
 
 ## Troubleshooting
 
-| Issue | Check |
-|-------|-------|
-| Agent doesn't call workflow | Workflow tool assigned? Instructions mention it? |
-| No email | Kibana rule threshold "above 0"? Rule runs every 1 min? |
-| API fails on Render | ES_ENDPOINT and ES_API_KEY set? |
-| Cron not running | Render: plan starter or higher. GitHub: secrets set? |
-| LOOKUP JOIN fails | Elasticsearch 8.18+? drug_interactions in lookup mode? |
+| Issue | Condition to Check |
+|-------|--------------------|
+| Agent doesn't call workflow | Workflow tool `log_interaction_alert` assigned? Instructions say "log for critical/moderate"? |
+| No email | Kibana rule: query `severity: critical` AND `status: pending_review`? Threshold count > 0? Schedule every 1 min? Email connector configured? |
+| Batch finds "No unchecked medications" | Any meds with `interaction_checked: false`? Run simulate_prescription or add_prescription.py first. |
+| API fails on Render | `ES_ENDPOINT` and `ES_API_KEY` in Render env vars? |
+| Cron not running | GitHub: `ES_ENDPOINT`, `ES_API_KEY` secrets set? Render: cron needs paid plan; use GitHub Actions. |
+| LOOKUP JOIN fails | Elasticsearch 8.18+? `drug_interactions` in lookup mode? |
+| Alert in Discover but no email | Rule filters `severity: critical` only — moderate alerts won't trigger. Check rule query. |
 
 ---
 

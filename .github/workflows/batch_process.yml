@@ -1,6 +1,7 @@
 # =============================================================================
-# GitHub Actions: Run Batch Processor (Manual Trigger)
+# Option B: Run Batch Processor (Autonomous Batch)
 # =============================================================================
+# GitHub Actions: Run Batch Processor (Manual Trigger)
 # Manually run batch-check + process-queue (same as cron, on demand).
 # Connects to Elasticsearch via ES_ENDPOINT and ES_API_KEY secrets.
 #

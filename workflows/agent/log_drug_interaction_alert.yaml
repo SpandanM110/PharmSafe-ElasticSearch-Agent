@@ -1,10 +1,14 @@
 # =============================================================================
-# LEGACY PATH — Use workflows/agent/log_drug_interaction_alert.yaml for Option A
-# =============================================================================
-# This file is kept for backward compatibility with:
-# https://github.com/SpandanM110/PharmSafe-ElasticSearch-Agent/blob/main/workflows/log_drug_interaction_alert.yaml
+# Option A: Agent Workflow — Log Drug Interaction Alert
+# Category: pharmasafe, healthcare, alerts
 #
-# For new setups, import from: workflows/agent/log_drug_interaction_alert.yaml
+# Creates an interaction alert document when the PharmaSafe agent detects
+# a critical or moderate drug interaction. The agent invokes this workflow
+# as a tool. The document is indexed to interaction_alerts, which triggers
+# the Kibana Alerting rule to send email via SMTP.
+#
+# Use: Import into Kibana when using Option A (Agent path).
+# Reference: https://github.com/elastic/workflows
 # =============================================================================
 name: log_drug_interaction_alert
 description: Logs a drug interaction alert to interaction_alerts when the PharmaSafe agent detects a critical or moderate conflict. Creates an official record for pharmacist review.
@@ -16,9 +20,17 @@ tags:
   - drug-interactions
   - alerts
 
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Manual trigger - invoked by the PharmaSafe agent when it detects an interaction
 triggers:
   - type: manual
 
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Parameters passed by the agent when invoking this workflow
 inputs:
   - name: patient_id
     type: string
@@ -50,16 +62,31 @@ inputs:
     default: ""
     description: Prescribing physician name (for targeted notifications)
 
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
 consts:
   indexName: interaction_alerts
 
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
 steps:
+  # -------------------------------------------------------------------------
+  # STEP 1: Generate alert ID and timestamp
+  # -------------------------------------------------------------------------
+  # Uses Liquid to create alert_id (ALR-XXXXXXXX format) and ISO timestamp
   - name: prepare_document
     type: console
     with:
       message: |
         Preparing alert for {{ inputs.patient_id }}: {{ inputs.new_drug }} + {{ inputs.conflicting_drug }} ({{ inputs.severity }})
 
+  # -------------------------------------------------------------------------
+  # STEP 2: Index the alert document to interaction_alerts
+  # -------------------------------------------------------------------------
+  # Uses elasticsearch.request to POST a document. Document _id = alert_id
+  # for compatibility with list_alerts and update_alert_status scripts.
   - name: index_alert
     type: elasticsearch.request
     with:
@@ -82,6 +109,9 @@ steps:
           "prescribing_doctor": "{{ inputs.prescribing_doctor | default: '' }}"
         }
 
+  # -------------------------------------------------------------------------
+  # STEP 3: Confirm success
+  # -------------------------------------------------------------------------
   - name: confirm_indexed
     type: console
     with:
