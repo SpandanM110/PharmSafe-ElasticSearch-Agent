@@ -1,0 +1,53 @@
+# =============================================================================
+# GitHub Actions: Run Batch Processor (Manual Trigger)
+# =============================================================================
+# Manually run batch-check + process-queue (same as cron, on demand).
+# Connects to Elasticsearch via ES_ENDPOINT and ES_API_KEY secrets.
+#
+# Use: Actions → Run batch processor → Run workflow
+# =============================================================================
+
+name: Run batch processor
+
+on:
+  workflow_dispatch:
+
+jobs:
+  batch-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run batch interaction check
+        env:
+          ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
+          ES_API_KEY: ${{ secrets.ES_API_KEY }}
+        run: python scripts/batch_check_interactions.py
+
+  process-queue:
+    needs: batch-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Process alert queue
+        env:
+          ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
+          ES_API_KEY: ${{ secrets.ES_API_KEY }}
+        run: python scripts/process_alert_queue.py

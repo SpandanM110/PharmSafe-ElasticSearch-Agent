@@ -145,6 +145,7 @@ For fully autonomous operation at no cost, use GitHub Actions for the cron:
 
 1. Add secrets: `ES_ENDPOINT`, `ES_API_KEY`
 2. Cron runs every 5 min: batch-check → process-queue (free for public repos)
+3. **Manual test:** Actions → **Run batch processor** → Run workflow (runs batch-check + process-queue on demand)
 
 ### Local Test
 
