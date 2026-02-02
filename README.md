@@ -2,6 +2,8 @@
 
 An AI agent that checks new prescriptions against a patient's full medication history for dangerous interactions. Built on Elasticsearch, Kibana Agent Builder, and ES|QL.
 
+**License:** [MIT](LICENSE) — Copyright (c) 2025 Spandan Mukherjee
+
 ---
 
 ## Overview
